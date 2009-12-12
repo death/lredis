@@ -98,9 +98,9 @@
                                       (when (consp x)
                                         (list (car x))))
                                     spec)
-                            `(&key (,connection *connection*))
+                            `(&key ((:connection ,connection) *connection*))
                             (unless no-read
-                              `(,octets))))
+                              `(((:octets ,octets))))))
             (octets-form
              `(babel-streams:with-output-to-sequence (,out)
                 ,@(loop for first-time = t then nil
