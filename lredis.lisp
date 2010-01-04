@@ -45,7 +45,8 @@
   `(call-with-connection (lambda (,connection) ,@forms) ,host ,port))
 
 (define-condition redis-error (error)
-  ((text :initarg :text :accessor text)))
+  ((text :initarg :text :accessor text))
+  (:report (lambda (c s) (format s "Redis error: ~A" (text c)))))
 
 (defun translate-result (result want-octets booleanize split)
   (labels ((str (x) (if split (values (split-sequence:split-sequence #\Space x)) x)))
