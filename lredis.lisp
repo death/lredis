@@ -18,6 +18,7 @@
    #:rpush #:lpush #:llen #:lrange #:ltrim #:lindex #:lset #:lrem #:lpop #:rpop
    #:sadd #:srem #:spop #:smove #:scard #:sismember #:sinter #:sinterstore
    #:sunion #:sunionstore #:sdiff #:sdiffstore #:smembers
+   #:zadd #:zrem #:zincrby #:zrange #:zrevrange #:zrangebyscore #:zcard #:zscore #:zremrangebyscore
    #:select #:move #:flushdb #:flushall
    #:sort
    #:save #:bgsave #:lastsave #:shutdown
@@ -184,6 +185,15 @@
   (sdiff (keys :keys))
   (sdiffstore (dstkey :key) (keys :keys))
   (smembers (key :key))
+  (zadd (key :key) (score :integer) (member :bulk))
+  (zrem (key :key) (member :bulk))
+  (zincrby (key :key) (increment :integer) (member :bulk))
+  (zrange (key :key) (start :integer) (end :integer))
+  (zrevrange (key :key) (start :integer) (end :integer))
+  (zrangebyscore (key :key) (min :integer) (max :integer))
+  (zcard (key :key))
+  (zscore (key :key) (element :bulk))
+  (zremrangebyscore (key :key) (min :integer) (max :integer))
   (select (index :integer))
   (move :boolean (key :key) (dbindex :integer))
   (flushdb)
