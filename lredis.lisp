@@ -124,6 +124,9 @@
                            `(princ ,(car x) ,out))
                           ((cons symbol (cons (eql :bulk) null))
                            `(progn
+                              (when (stringp ,(car x))
+                                (setf ,(car x)
+                                      (babel:string-to-octets ,(car x))))
                               (princ (length ,(car x)) ,out)
                               (write-sequence #(13 10) ,out)
                               (write-sequence ,(car x) ,out)))))
