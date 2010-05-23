@@ -10,7 +10,7 @@
   (:shadow #:set #:get #:type #:sort)
   (:export
    #:*port* #:*host* #:*connection*
-   #:with-connection
+   #:open-connection #:close-connection #:with-connection
    #:redis-error #:text
    #:quit #:auth #:ping
    #:set #:get #:getset #:mget #:setnx #:incr #:incrby #:decr #:decrby #:exists #:del #:type
@@ -32,18 +32,29 @@
 (defvar *connection*)
 
 (defclass connection ()
-  ((socket-stream :initarg :socket-stream :accessor socket-stream)))
+  ((socket :initarg :socket :accessor connection-socket)))
 
-(defun call-with-connection (fn host port)
+(defun open-connection (&optional host port)
   (when (null host) (setf host *host*))
   (when (null port) (setf port *port*))
-  (usocket:with-client-socket (socket stream host port :element-type '(unsigned-byte 8))
-    (let ((conn (make-instance 'connection :socket-stream stream)))
-      (funcall fn conn))))
+  (make-instance 'connection
+                 :socket (usocket:socket-connect host port :element-type '(unsigned-byte 8))))
+
+(defun close-connection (connection)
+  (when (connection-socket connection)
+    (usocket:socket-close (connection-socket connection))
+    (setf (connection-socket connection) nil)))
+
+(defun connection-stream (connection)
+  (usocket:socket-stream (connection-socket connection)))
 
 (defmacro with-connection ((&key connection host port) &body forms)
   (when (null connection) (setf connection '*connection*))
-  `(call-with-connection (lambda (,connection) ,@forms) ,host ,port))
+  `(let ((,connection (open-connection ,host ,port)))
+     (unwind-protect
+          (progn ,@forms)
+       (when ,connection
+         (close-connection ,connection)))))
 
 (define-condition redis-error (error)
   ((text :initarg :text :accessor text))
@@ -74,15 +85,15 @@
 
 (defun read-reply (connection)
   (multiple-value-bind (magic line)
-      (read-delimited-bytes (socket-stream connection))
+      (read-delimited-bytes (connection-stream connection))
     (ecase magic
       (43 (babel:octets-to-string line))
       (36 (let ((n (parse-integer (babel:octets-to-string line))))
             (cond ((= n -1) nil)
                   (t (let ((data (make-array n :element-type '(unsigned-byte 8))))
-                       (read-sequence data (socket-stream connection))
-                       (read-byte (socket-stream connection)) ; CR
-                       (read-byte (socket-stream connection)) ; LF
+                       (read-sequence data (connection-stream connection))
+                       (read-byte (connection-stream connection)) ; CR
+                       (read-byte (connection-stream connection)) ; LF
                        data)))))
       (42 (let ((n (parse-integer (babel:octets-to-string line))))
             (cond ((= n -1) (values nil nil))
@@ -132,8 +143,8 @@
                               (write-sequence ,(car x) ,out)))))
                 (write-sequence #(13 10) ,out))))
         `(defun ,name ,inputs
-           (write-sequence ,octets-form (socket-stream ,connection))
-           (force-output (socket-stream ,connection))
+           (write-sequence ,octets-form (connection-stream ,connection))
+           (force-output (connection-stream ,connection))
            ,(if no-read
                 `(values)
                 `(translate-result (read-reply ,connection) ,octets ,booleanize ,split)))))))
@@ -234,6 +245,6 @@
      (when alpha
        (write-sequence " ALPHA" out))
      (write-sequence #(13 10) out))
-   (socket-stream connection))
-  (force-output (socket-stream connection))
+   (connection-stream connection))
+  (force-output (connection-stream connection))
   (translate-result (read-reply connection) octets nil nil))
