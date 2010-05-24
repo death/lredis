@@ -9,9 +9,14 @@
   (:use #:cl)
   (:shadow #:set #:get #:type #:sort #:append)
   (:export
-   #:*port* #:*host* #:*connection*
-   #:open-connection #:close-connection #:with-connection
-   #:redis-error #:text
+   #:*port*
+   #:*host*
+   #:*connection*
+   #:open-connection
+   #:close-connection
+   #:with-connection
+   #:redis-error
+   #:text
    ;; Connection handling
    #:quit
    #:auth
