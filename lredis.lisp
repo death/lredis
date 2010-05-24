@@ -156,14 +156,13 @@
   ((text :initarg :text :accessor text))
   (:report (lambda (c s) (format s "Redis error: ~A" (text c)))))
 
-(defun translate-result (result want-octets booleanize split)
-  (labels ((str (x) (if split (values (split-sequence:split-sequence #\Space x)) x)))
-    (etypecase result
-      (null result)
-      (integer (if booleanize (= 1 result) result))
-      (string (if want-octets (babel:string-to-octets result) (str result)))
-      (vector (if want-octets result (str (babel:octets-to-string result))))
-      (cons (map-into result (lambda (x) (translate-result x want-octets booleanize split)) result)))))
+(defun translate-result (result want-octets booleanize)
+  (etypecase result
+    (null result)
+    (integer (if booleanize (= 1 result) result))
+    (string (if want-octets (babel:string-to-octets result) result))
+    (vector (if want-octets result (babel:octets-to-string result)))
+    (cons (map-into result (lambda (x) (translate-result x want-octets booleanize)) result))))
 
 (defun key-sequence (key)
   (etypecase key
@@ -214,7 +213,6 @@
              
 (defmacro define-command (name &rest spec)
   (let ((booleanize (when (eq (car spec) :boolean) (pop spec)))
-        (split (when (eq (car spec) :split) (pop spec)))
         (no-read (when (eq (car spec) :no-read) (pop spec)))
         (docstring (car (last spec)))
         (spec (butlast spec)))
@@ -263,7 +261,7 @@
            (force-output (connection-stream connection))
            ,(if no-read
                 `(values)
-                `(translate-result (read-reply connection) octets ,booleanize ,split)))))))
+                `(translate-result (read-reply connection) octets ,booleanize)))))))
 
 ;; Connection handling
 
@@ -406,7 +404,7 @@ from the sorted set.")
                      (write-multi-bulk (nreverse sequences) nsequences out))
                    (connection-stream connection))
                   (force-output (connection-stream connection))
-                  (translate-result (read-reply connection) octets nil nil)))))
+                  (translate-result (read-reply connection) octets nil)))))
   (frob zunionstore "Union over a number of sorted sets with optional weight and aggregate.")
   (frob zinterstore "Intersect over a number of sorted sets with optional weight and aggregate."))
 
@@ -460,7 +458,7 @@ from the sorted set.")
        (write-multi-bulk (nreverse sequences) nsequences out))
      (connection-stream connection))
     (force-output (connection-stream connection))
-    (translate-result (read-reply connection) octets nil nil)))
+    (translate-result (read-reply connection) octets nil)))
 
 ;; Transactions
 

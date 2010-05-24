@@ -8,5 +8,5 @@
 
 (asdf:defsystem #:lredis
   :description "Lisp Redis bindings"
-  :depends-on (#:babel #:babel-streams #:split-sequence #:usocket)
+  :depends-on (#:babel #:babel-streams #:usocket)
   :components ((:file "lredis")))
