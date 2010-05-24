@@ -37,8 +37,8 @@
    #:mget
    #:setnx
    #:setex
-   ;; TODO: mset
-   ;; TODO: msetnx
+   #:mset
+   #:msetnx
    #:incr
    #:incrby
    #:decr
@@ -87,12 +87,12 @@
    #:zscore
    #:zremrangebyrank
    #:zremrangebyscore
-   ;; TODO: zunionstore
-   ;; TODO: zinterstore
+   #:zunionstore
+   #:zinterstore
    ;; Commands operating on hashes
    #:hset
    #:hget
-   ;; TODO: hmset
+   #:hmset
    #:hincrby
    #:hexists
    #:hdel
@@ -165,10 +165,11 @@
       (vector (if want-octets result (str (babel:octets-to-string result))))
       (cons (map-into result (lambda (x) (translate-result x want-octets booleanize split)) result)))))
 
-(defun write-key (key stream)
+(defun key-sequence (key)
   (etypecase key
-    ((or string symbol) (princ key stream))
-    (cons (format stream "~{~A~^:~}" key))))
+    (cons (format nil "~{~A~^:~}" key))
+    (sequence key)
+    (symbol (symbol-name key))))
 
 (defun read-delimited-bytes (stream)
   (let ((magic (read-byte stream)))
@@ -197,6 +198,20 @@
       (58 (values (parse-integer (babel:octets-to-string line))))
       (45 (error 'redis-error :text (babel:octets-to-string line))))))
 
+(defun write-multi-bulk (sequences n out)
+  (write-byte 42 out)
+  (princ n out)
+  (write-sequence #(13 10) out)
+  (map nil (lambda (sequence)
+             (when (stringp sequence)
+               (setf sequence (babel:string-to-octets sequence)))
+             (write-byte 36 out)
+             (princ (length sequence) out)
+             (write-sequence #(13 10) out)
+             (write-sequence sequence out)
+             (write-sequence #(13 10) out))
+       sequences))
+             
 (defmacro define-command (name &rest spec)
   (let ((booleanize (when (eq (car spec) :boolean) (pop spec)))
         (split (when (eq (car spec) :split) (pop spec)))
@@ -204,49 +219,51 @@
         (docstring (car (last spec)))
         (spec (butlast spec)))
     (push (symbol-name name) spec)
-    (let ((connection (gensym)) (octets (gensym)) (out (gensym)))
-      (let ((inputs (cl:append (mapcan (lambda (x)
-                                         (when (consp x)
-                                           (list (car x))))
-                                       spec)
-                               `(&key ((:connection ,connection) *connection*))
-                               (unless no-read
-                                 `(((:octets ,octets))))))
-            (octets-form
-             `(babel-streams:with-output-to-sequence (,out)
-                ,@(loop for first-time = t then nil
-                        for x in spec
-                        when (not first-time) collect `(write-byte 32 ,out)
-                        when t collect
-                        (etypecase x
-                          (string
-                           `(write-sequence ,(map 'vector #'char-code x) ,out))
-                          ((cons symbol (cons (eql :string) null))
-                           `(write-string ,(car x) ,out))
-                          ((cons symbol (cons (eql :key) null))
-                           `(write-key ,(car x) ,out))
-                          ((cons symbol (cons (eql :keys) null))
-                           `(dolist (element ,(car x))
-                              (write-key element ,out)
-                              (write-byte 32 ,out)))
-                          ((cons symbol (cons (eql :integer) null))
-                           `(princ ,(car x) ,out))
-                          ((cons symbol (cons (eql :bulk) null))
-                           `(progn
-                              (when (stringp ,(car x))
-                                (setf ,(car x)
-                                      (babel:string-to-octets ,(car x))))
-                              (princ (length ,(car x)) ,out)
-                              (write-sequence #(13 10) ,out)
-                              (write-sequence ,(car x) ,out)))))
-                (write-sequence #(13 10) ,out))))
+    (let ((inputs (cl:append (mapcan (lambda (x)
+                                       (when (consp x)
+                                         (list (if (eq (car x) 'list)
+                                                   (cadr x)
+                                                   (car x)))))
+                                     spec)
+                             `(&key (connection *connection*))
+                             (unless no-read
+                               `((octets nil))))))
+      (labels ((sequence-adding-form (form)
+                 `(progn
+                    (push ,form sequences)
+                    (incf nsequences)))
+               (handle-arg (x)
+                 (etypecase x
+                   (string
+                    (sequence-adding-form x))
+                   ((cons (eql list))
+                    (destructuring-bind (op var &rest types) x
+                      (declare (ignore op))
+                      `(do () ((null ,var))
+                         ,@(mapcar (lambda (type)
+                                     (handle-arg `((pop ,var) ,type)))
+                                   types))))
+                   ((cons t (cons (eql :string) null))
+                    (sequence-adding-form (car x)))
+                   ((cons t (cons (eql :key) null))
+                    (sequence-adding-form `(key-sequence ,(car x))))
+                   ((cons t (cons (eql :integer) null))
+                    (sequence-adding-form `(princ-to-string ,(car x))))
+                   ((cons t (cons (eql :bulk) null))
+                    (sequence-adding-form (car x))))))
         `(defun ,name ,inputs
            ,docstring
-           (write-sequence ,octets-form (connection-stream ,connection))
-           (force-output (connection-stream ,connection))
+           (let ((sequences '())
+                 (nsequences 0))
+             ,@(mapcar #'handle-arg spec)
+             (write-sequence
+              (babel-streams:with-output-to-sequence (out)
+                (write-multi-bulk (nreverse sequences) nsequences out))
+              (connection-stream connection)))
+           (force-output (connection-stream connection))
            ,(if no-read
                 `(values)
-                `(translate-result (read-reply ,connection) ,octets ,booleanize ,split)))))))
+                `(translate-result (read-reply connection) octets ,booleanize ,split)))))))
 
 ;; Connection handling
 
@@ -255,10 +272,14 @@
 
 ;; Commands operating on all kinds of values
 
+;; According to the command reference keys should return a
+;; space-separated list of keys, but it looks like this is no longer
+;; the case.
+
 (define-command exists :boolean (key :key) "Test if a key exists.")
 (define-command del :boolean (key :key) "Delete a key.")
 (define-command type (key :key) "Return the type of the value stored at key.")
-(define-command keys :split (pattern :key) "Return all the keys matching a given pattern.")
+(define-command keys (pattern :key) "Return all the keys matching a given pattern.")
 (define-command randomkey "Return a random key from the key space.")
 (define-command rename (oldname :key) (newname :key) "Rename the old key to the new one, superseding any existing key.")
 (define-command renamenx :boolean (oldname :key) (newname :key) "Rename the old key to the new one unless a key with the new name already exists.")
@@ -275,11 +296,11 @@
 (define-command set (key :key) (value :bulk) "Set a key to a string value.")
 (define-command get (key :key) "Return the string value of the key.")
 (define-command getset (key :key) (value :bulk) "Set a key to a string returning the old value of the key.")
-(define-command mget (keys :keys) "Multi-get, return the string values of the keys.")
+(define-command mget (list keys :key) "Multi-get, return the string values of the keys.")
 (define-command setnx :boolean (key :key) (value :bulk) "Set a key to a string value if the key does not exist.")
 (define-command setex (key :key) (time :integer) (value :bulk) "Set+Expire combo command")
-;; TODO: mset
-;; TODO: msetnx
+(define-command mset (list keys/vals :key :bulk) "Set multiple keys to multiple values in a single atomic operation.")
+(define-command msetnx (list keys/vals :key :bulk) "Set multiple keys to multiple values in a single atomic operation if none of the keys already exist.")
 (define-command incr (key :key) "Increment the integer value of key.")
 (define-command incrby (key :key) (integer :integer) "Increment the integer value of key by integer.")
 (define-command decr (key :key) "Decrement the integer value of key.")
@@ -299,8 +320,8 @@
 (define-command lrem (key :key) (count :integer) (value :bulk) "Remove the first-N, last-N, or all the elements matching value from the list at key.")
 (define-command lpop (key :key) "Return and remove (atomically) the first element of the list at key.")
 (define-command rpop (key :key) "Return and remove (atomically) the last element of the list at key.")
-(define-command blpop (keys :keys) (timeout :integer) "Blocking LPOP")
-(define-command brpop (keys :keys) (timeout :integer) "Blocking RPOP")
+(define-command blpop (list keys :key) (timeout :integer) "Blocking LPOP")
+(define-command brpop (list keys :key) (timeout :integer) "Blocking RPOP")
 (define-command rpoplpush (srckey :key) (dstkey :key)
   "Return and remove (atomically) the last element of the source list
 stored at srckey and push the same element to the destination list
@@ -314,12 +335,12 @@ stored at dstkey")
 (define-command smove :boolean (srckey :key) (dstkey :key) "Move the specified member from one set to another atomically.")
 (define-command scard (key :key) "Return the number of elements (the cardinality) of the set at key.")
 (define-command sismember :boolean (key :key) (member :key) "Test if the specified value is a member of the set at key.")
-(define-command sinter (keys :keys) "Return the intersection of the sets stored at keys.")
-(define-command sinterstore (dstkey :key) (keys :keys) "Compute the intersection of the sets stored at keys and store the resulting set at dstkey.")
-(define-command sunion (keys :keys) "Return the union of the sets stored at keys.")
-(define-command sunionstore (dstkey :key) (keys :keys) "Compute the union of the sets stored at keys and store the resulting set at dstkey.")
-(define-command sdiff (keys :keys) "Return the difference between the set stored at the first key and the sets stored at the rest of the keys.")
-(define-command sdiffstore (dstkey :key) (keys :keys)
+(define-command sinter (list keys :key) "Return the intersection of the sets stored at keys.")
+(define-command sinterstore (dstkey :key) (list keys :key) "Compute the intersection of the sets stored at keys and store the resulting set at dstkey.")
+(define-command sunion (list keys :key) "Return the union of the sets stored at keys.")
+(define-command sunionstore (dstkey :key) (list keys :key) "Compute the union of the sets stored at keys and store the resulting set at dstkey.")
+(define-command sdiff (list keys :key) "Return the difference between the set stored at the first key and the sets stored at the rest of the keys.")
+(define-command sdiffstore (dstkey :key) (list keys :key)
   "Compute the difference between the set stored at the first key and
 the sets stored at the rest of the keys, and store it at dstkey.")
 (define-command smembers (key :key) "Return all the members of the set value at key.")
@@ -355,8 +376,39 @@ from the sorted set.")
   "Remove all the elements with min <= rank <= max rank from the sorted set.")
 (define-command zremrangebyscore (key :key) (min :integer) (max :integer)
   "Remove all the elements with min <= score <= max score from the sorted set.")
-;; TODO: zunionstore
-;; TODO: zinterstore
+
+(macrolet ((frob (name docstring)
+             `(defun ,name (dstkey n keys &key (connection *connection*) (octets nil) weights aggregate)
+                ,docstring
+                (let ((sequences '())
+                      (nsequences 0))
+                  (flet ((add-sequence (sequence)
+                           (push sequence sequences)
+                           (incf nsequences)))
+                    (add-sequence ,(princ-to-string name))
+                    (add-sequence (key-sequence dstkey))
+                    (add-sequence (princ-to-string n))
+                    (dolist (key keys)
+                      (add-sequence (key-sequence key)))
+                    (when weights
+                      (add-sequence "WEIGHTS")
+                      (dolist (weight weights)
+                        (add-sequence (princ-to-string weight))))
+                    (when aggregate
+                      (add-sequence "AGGREGATE")
+                      (add-sequence
+                       (ecase aggregate
+                         (:sum "SUM")
+                         (:min "MIN")
+                         (:max "MAX")))))
+                  (write-sequence
+                   (babel-streams:with-output-to-sequence (out)
+                     (write-multi-bulk (nreverse sequences) nsequences out))
+                   (connection-stream connection))
+                  (force-output (connection-stream connection))
+                  (translate-result (read-reply connection) octets nil nil)))))
+  (frob zunionstore "Union over a number of sorted sets with optional weight and aggregate.")
+  (frob zinterstore "Intersect over a number of sorted sets with optional weight and aggregate."))
 
 ;; Commands operating on hashes
 
@@ -364,7 +416,7 @@ from the sorted set.")
 
 (define-command hset (key :key) (field :string) (value :bulk) "Set the hash field to the specified value.  Creates the hash if needed.")
 (define-command hget (key :key) (field :bulk) "Retrieve the value of the specified hash field.")
-;; TODO: hmset
+(define-command hmset (key :key) (list fields/vals :string :bulk) "Set the hash fields to their respective values.")
 (define-command hincrby (key :key) (field :string) (integer :integer) "Increment the integer value of the hash at key on field with integer.")
 (define-command hexists :boolean (key :key) (field :bulk) "Test for existence of a specified field in a hash.")
 (define-command hdel (key :key) (field :bulk) "Remove the specified field from a hash.")
@@ -375,36 +427,40 @@ from the sorted set.")
 
 ;; Sorting
 
-(defun sort (key &key (connection *connection*) octets order limit-start limit-end by get alpha)
+(defun sort (key &key (connection *connection*) (octets nil) order (limit-start 0) limit-end by get alpha)
   "Sort a set or a list according to the specified parameters."
-  (write-sequence
-   (babel-streams:with-output-to-sequence (out)
-     (write-sequence "SORT " out)
-     (write-key key out)
-     (when by
-       (write-sequence " BY " out)
-       (write-key by out))
-     (when (and limit-start limit-end)
-       (write-sequence " LIMIT " out)
-       (princ limit-start out)
-       (write-byte 32 out)
-       (princ limit-end out))
-     (when get
-       (when (stringp get)
-         (setf get (list get)))
-       (dolist (x get)
-         (write-sequence " GET " out)
-         (write-key x out)))
-     (ecase order
-       ((:asc :ascending) (write-sequence " ASC" out))
-       ((:desc :descending) (write-sequence " DESC" out))
-       ((nil)))
-     (when alpha
-       (write-sequence " ALPHA" out))
-     (write-sequence #(13 10) out))
-   (connection-stream connection))
-  (force-output (connection-stream connection))
-  (translate-result (read-reply connection) octets nil nil))
+  (let ((sequences '())
+        (nsequences 0))
+    (flet ((add-sequence (sequence)
+             (push sequence sequences)
+             (incf nsequences)))
+      (add-sequence "SORT")
+      (add-sequence (key-sequence key))
+      (when by
+        (add-sequence "BY")
+        (add-sequence (key-sequence by)))
+      (when (and limit-start limit-end)
+        (add-sequence "LIMIT")
+        (add-sequence (princ-to-string limit-start))
+        (add-sequence (princ-to-string limit-end)))
+      (when get
+        (when (stringp get)
+          (setf get (list get)))
+        (dolist (x get)
+          (add-sequence "GET")
+          (add-sequence (key-sequence x))))
+      (ecase order
+        ((:asc :ascending) (add-sequence "ASC"))
+        ((:desc :descending) (add-sequence "DESC"))
+        ((nil)))
+      (when alpha
+        (add-sequence "ALPHA")))
+    (write-sequence
+     (babel-streams:with-output-to-sequence (out)
+       (write-multi-bulk (nreverse sequences) nsequences out))
+     (connection-stream connection))
+    (force-output (connection-stream connection))
+    (translate-result (read-reply connection) octets nil nil)))
 
 ;; Transactions
 
