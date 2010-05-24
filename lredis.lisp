@@ -113,7 +113,7 @@
    #:lastsave
    #:shutdown
    #:bgrewriteaof
-   ;; Remove server control commands
+   ;; Remote server control commands
    #:info
    #:slaveof
    #:config
@@ -478,7 +478,7 @@ from the sorted set.")
 (define-command shutdown :no-read "Synchronously save the database on disk, then shutdown the server.")
 (define-command bgrewriteaof "Rewrite the append only file in the background when it gets too big.")
 
-;; Remove server control commands
+;; Remote server control commands
 
 (define-command info "Provide information and statistics about the server")
 (define-command slaveof (host :string) (port :integer) "Change the replication settings.")
