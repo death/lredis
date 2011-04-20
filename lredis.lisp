@@ -96,6 +96,7 @@
    #:zinterstore
    ;; Commands operating on hashes
    #:hset
+   #:hsetnx
    #:hget
    #:hmset
    #:hincrby
@@ -418,6 +419,7 @@ from the sorted set.")
 ;; Some commands here are bulk commands rather than inline.  Why?
 
 (define-command hset (key :key) (field :string) (value :bulk) "Set the hash field to the specified value.  Creates the hash if needed.")
+(define-command hsetnx (key :key) (field :string) (value :bulk) "Set the hash field to the specified value, if the field does not exist.  Creates the hash if needed.")
 (define-command hget (key :key) (field :bulk) "Retrieve the value of the specified hash field.")
 (define-command hmset (key :key) (list fields/vals :string :bulk) "Set the hash fields to their respective values.")
 (define-command hincrby (key :key) (field :string) (integer :integer) "Increment the integer value of the hash at key on field with integer.")
