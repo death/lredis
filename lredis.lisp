@@ -8,6 +8,9 @@
   (:nicknames #:redis)
   (:use #:cl)
   (:shadow #:set #:get #:type #:sort #:append)
+  (:import-from #:babel #:string-to-octets #:octets-to-string)
+  (:import-from #:babel-streams #:with-output-to-sequence)
+  (:import-from #:usocket #:socket-connect #:socket-close #:socket-stream)
   (:export
    #:*port*
    #:*host*
@@ -151,17 +154,17 @@
   (when (null host) (setf host *host*))
   (when (null port) (setf port *port*))
   (make-instance 'connection
-                 :socket (usocket:socket-connect host port :element-type '(unsigned-byte 8))))
+                 :socket (socket-connect host port :element-type '(unsigned-byte 8))))
 
 (defun close-connection (connection)
   (when (connection-socket connection)
-    (usocket:socket-close (connection-socket connection))
+    (socket-close (connection-socket connection))
     (setf (connection-socket connection) nil)
     (clrhash (connection-channel-subscriptions connection))
     (clrhash (connection-pattern-subscriptions connection))))
 
 (defun connection-stream (connection)
-  (usocket:socket-stream (connection-socket connection)))
+  (socket-stream (connection-socket connection)))
 
 (defmacro with-connection ((&key connection host port) &body forms)
   (when (null connection) (setf connection '*connection*))
@@ -179,8 +182,8 @@
   (etypecase result
     (null result)
     (integer (if booleanize (= 1 result) result))
-    (string (if want-octets (babel:string-to-octets result) result))
-    (vector (if want-octets result (babel:octets-to-string result)))
+    (string (if want-octets (string-to-octets result) result))
+    (vector (if want-octets result (octets-to-string result)))
     (cons (map-into result (lambda (x) (translate-result x want-octets booleanize)) result))))
 
 (defun key-sequence (key)
@@ -202,19 +205,19 @@
   (multiple-value-bind (magic line)
       (read-delimited-bytes (connection-stream connection))
     (ecase magic
-      (43 (babel:octets-to-string line))
-      (36 (let ((n (parse-integer (babel:octets-to-string line))))
+      (43 (octets-to-string line))
+      (36 (let ((n (parse-integer (octets-to-string line))))
             (cond ((= n -1) nil)
                   (t (let ((data (make-array n :element-type '(unsigned-byte 8))))
                        (read-sequence data (connection-stream connection))
                        (read-byte (connection-stream connection)) ; CR
                        (read-byte (connection-stream connection)) ; LF
                        data)))))
-      (42 (let ((n (parse-integer (babel:octets-to-string line))))
+      (42 (let ((n (parse-integer (octets-to-string line))))
             (cond ((= n -1) (values nil nil))
                   (t (values (loop repeat n collecting (read-reply connection)) t)))))
-      (58 (values (parse-integer (babel:octets-to-string line))))
-      (45 (error 'redis-error :text (babel:octets-to-string line))))))
+      (58 (values (parse-integer (octets-to-string line))))
+      (45 (error 'redis-error :text (octets-to-string line))))))
 
 (defun write-multi-bulk (sequences n out)
   (write-byte 42 out)
@@ -222,7 +225,7 @@
   (write-sequence #(13 10) out)
   (map nil (lambda (sequence)
              (when (stringp sequence)
-               (setf sequence (babel:string-to-octets sequence)))
+               (setf sequence (string-to-octets sequence)))
              (write-byte 36 out)
              (princ (length sequence) out)
              (write-sequence #(13 10) out)
@@ -275,7 +278,7 @@
                  (nsequences 0))
              ,@(mapcar #'handle-arg spec)
              (write-sequence
-              (babel-streams:with-output-to-sequence (out)
+              (with-output-to-sequence (out)
                 (write-multi-bulk (nreverse sequences) nsequences out))
               (connection-stream connection)))
            (force-output (connection-stream connection))
@@ -420,7 +423,7 @@ from the sorted set.")
                          (:min "MIN")
                          (:max "MAX")))))
                   (write-sequence
-                   (babel-streams:with-output-to-sequence (out)
+                   (with-output-to-sequence (out)
                      (write-multi-bulk (nreverse sequences) nsequences out))
                    (connection-stream connection))
                   (force-output (connection-stream connection))
@@ -475,7 +478,7 @@ from the sorted set.")
       (when alpha
         (add-sequence "ALPHA")))
     (write-sequence
-     (babel-streams:with-output-to-sequence (out)
+     (with-output-to-sequence (out)
        (write-multi-bulk (nreverse sequences) nsequences out))
      (connection-stream connection))
     (force-output (connection-stream connection))
@@ -548,7 +551,7 @@ argument."
 
 (defun translate-event (event)
   (let ((kind (first event))
-        (key (babel:octets-to-string (second event))))
+        (key (octets-to-string (second event))))
     (cond ((equalp kind #(115 117 98 115 99 114 105 98 101))
            (values :subscribe key (third event)))
           ((equalp kind #(117 110 115 117 98 115 99 114 105 98 101))
@@ -560,7 +563,7 @@ argument."
           ((equalp kind #(112 117 110 115 117 98 115 99 114 105 98 101))
            (values :unsubscribe key (third event) key))
           ((equalp kind #(112 109 101 115 115 97 103 101))
-           (values :message key (fourth event) (babel:octets-to-string (third event))))
+           (values :message key (fourth event) (octets-to-string (third event))))
           (t (error 'pubsub-bad-event :event event)))))
 
 (define-condition pubsub-spam (pubsub-bad-event)
@@ -587,7 +590,7 @@ active and false otherwise."
                        (or channel key)
                        (if (subscription-want-octets subscription)
                            payload
-                           (babel:octets-to-string payload))))
+                           (octets-to-string payload))))
             t)))))
 
 ;; Persistence control commands
