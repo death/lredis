@@ -112,7 +112,14 @@
    #:multi
    #:exec
    #:discard
-   ;; TODO: Publish/Subscribe
+   ;; Publish/Subscribe
+   #:pubsub-bad-event
+   #:pubsub-bad-event-event
+   #:pubsub-spam
+   #:publish
+   #:subscribe
+   #:unsubscribe
+   #:pubsub-dispatch
    ;; Persistence control commands
    #:save
    #:bgsave
@@ -134,7 +141,11 @@
 (defvar *connection*)
 
 (defclass connection ()
-  ((socket :initarg :socket :accessor connection-socket)))
+  ((socket :initarg :socket :accessor connection-socket)
+   (channel-subscriptions :initform (make-hash-table :test 'equal)
+                          :accessor connection-channel-subscriptions)
+   (pattern-subscriptions :initform (make-hash-table :test 'equal)
+                          :accessor connection-pattern-subscriptions)))
 
 (defun open-connection (&optional host port)
   (when (null host) (setf host *host*))
@@ -145,7 +156,9 @@
 (defun close-connection (connection)
   (when (connection-socket connection)
     (usocket:socket-close (connection-socket connection))
-    (setf (connection-socket connection) nil)))
+    (setf (connection-socket connection) nil)
+    (clrhash (connection-channel-subscriptions connection))
+    (clrhash (connection-pattern-subscriptions connection))))
 
 (defun connection-stream (connection)
   (usocket:socket-stream (connection-socket connection)))
@@ -222,7 +235,8 @@
         (no-read (when (eq (car spec) :no-read) (pop spec)))
         (docstring (car (last spec)))
         (spec (butlast spec)))
-    (push (symbol-name name) spec)
+    (unless (stringp (car spec))
+      (push (symbol-name name) spec))
     (let ((inputs (cl:append (mapcan (lambda (x)
                                        (when (consp x)
                                          (list (if (eq (car x) 'list)
@@ -473,7 +487,108 @@ from the sorted set.")
 (define-command exec "Commit transaction")
 (define-command discard "Rollback transaction")
 
-;; TODO: Publish/Subscribe
+;; Publish/Subscribe
+
+(define-command %subscribe :no-read "SUBSCRIBE" (list channels :key) "Subscribe the client to the specified channels.")
+(define-command %unsubscribe :no-read "UNSUBSCRIBE" (list channels :key)
+  "Unsubscribe the client from the given channels, or from all of them if none is given.")
+(define-command %psubscribe :no-read "PSUBSCRIBE" (list patterns :key) "Subscribe the client to the given patterns.")
+(define-command %punsubscribe :no-read "PUNSUBSCRIBE" (list patterns :key) "Unsubscribe the client from the given patterns.")
+(define-command publish (channel :key) (message :bulk) "Post a message to a given channel.")
+
+;; We assume channel names are always represented as strings.
+
+(defclass subscription ()
+  ((function :initarg :function :reader subscription-function)
+   (want-octets :initarg :want-octets :reader subscription-want-octets)))
+
+(defun subscribe (function &key (connection *connection*)
+                                (want-octets nil)
+                                (channels '())
+                                (patterns '()))
+  "Subscribe the client to the specified channels or patterns, calling
+the function when a relevant event is available.  The function should
+take two arguments: the originating channel and the actual message."
+  (let ((subscription (make-instance 'subscription
+                                     :function function
+                                     :want-octets want-octets)))
+    (dolist (channel channels)
+      (setf (gethash channel (connection-channel-subscriptions connection)) subscription))
+    (when channels
+      (%subscribe channels :connection connection))
+    (dolist (pattern patterns)
+      (setf (gethash pattern (connection-pattern-subscriptions connection)) subscription))
+    (when patterns
+      (%psubscribe patterns :connection connection))))
+
+(defun unsubscribe (&key (channels '())
+                         (patterns '())
+                         (connection *connection*))
+  "Unsubscribe the client from the specified channels or patterns.  In
+order to unsubscribe from all channels or patterns, pass :ALL as an
+argument."
+  (when channels
+    (let ((subscriptions (connection-channel-subscriptions connection)))
+      (if (eq channels :all)
+          (clrhash subscriptions)
+          (dolist (channel channels)
+            (remhash channel subscriptions))))
+    (%unsubscribe (if (eq channels :all) '() channels) :connection *connection*))
+  (when patterns
+    (let ((subscriptions (connection-pattern-subscriptions connection)))
+      (if (eq patterns :all)
+          (clrhash subscriptions)
+          (dolist (pattern patterns)
+            (remhash pattern subscriptions))))
+    (%punsubscribe (if (eq patterns :all) '() patterns) :connection connection)))
+
+(define-condition pubsub-bad-event (redis-error)
+  ((event :initarg :event :reader pubsub-bad-event-event))
+  (:default-initargs :text "Bad publish/subscribe event."))
+
+(defun translate-event (event)
+  (let ((kind (first event))
+        (key (babel:octets-to-string (second event))))
+    (cond ((equalp kind #(115 117 98 115 99 114 105 98 101))
+           (values :subscribe key (third event)))
+          ((equalp kind #(117 110 115 117 98 115 99 114 105 98 101))
+           (values :unsubscribe key (third event)))
+          ((equalp kind #(109 101 115 115 97 103 101))
+           (values :message key (third event)))
+          ((equalp kind #(112 115 117 98 115 99 114 105 98 101))
+           (values :subscribe key (third event) key))
+          ((equalp kind #(112 117 110 115 117 98 115 99 114 105 98 101))
+           (values :unsubscribe key (third event) key))
+          ((equalp kind #(112 109 101 115 115 97 103 101))
+           (values :message key (fourth event) (babel:octets-to-string (third event))))
+          (t (error 'pubsub-bad-event :event event)))))
+
+(define-condition pubsub-spam (pubsub-bad-event)
+  ()
+  (:default-initargs :text "Publish/subscribe spam event."))
+
+(defun pubsub-dispatch (&key (connection *connection*))
+  "Wait for a publisher/subscriber event from Redis and dispatch
+appropriately.  There's no notification about subscriptions or
+unsubscriptions, but we return true if any subscriptions are still
+active and false otherwise."
+  (let ((event (read-reply connection)))
+    (multiple-value-bind (kind key payload channel) (translate-event event)
+      (if (eq kind :unsubscribe)
+          (plusp payload)
+          (let* ((subscriptions (if channel
+                                    (connection-pattern-subscriptions connection)
+                                    (connection-channel-subscriptions connection)))
+                 (subscription (gethash key subscriptions)))
+            (when (null subscription)
+              (error 'pubsub-spam :event event))
+            (when (eq kind :message)
+              (funcall (subscription-function subscription)
+                       (or channel key)
+                       (if (subscription-want-octets subscription)
+                           payload
+                           (babel:octets-to-string payload))))
+            t)))))
 
 ;; Persistence control commands
 
