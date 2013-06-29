@@ -8,5 +8,7 @@
 
 (asdf:defsystem #:lredis
   :description "Lisp Redis bindings"
+  :author "death <github.com/death>"
+  :license "BSD"
   :depends-on (#:babel #:babel-streams #:usocket)
   :components ((:file "lredis")))
