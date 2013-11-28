@@ -7,7 +7,7 @@
 (defpackage #:lredis
   (:nicknames #:redis)
   (:use #:cl)
-  (:shadow #:set #:get #:type #:sort #:append)
+  (:shadow #:set #:get #:type #:sort #:append #:time)
   (:import-from #:babel #:string-to-octets #:octets-to-string)
   (:import-from #:babel-streams #:with-output-to-sequence)
   (:import-from #:usocket #:socket-connect #:socket-close #:socket-stream)
@@ -33,11 +33,18 @@
    #:renamenx
    #:dbsize
    #:expire
+   #:expireat
+   #:pexpire
+   #:pexpireat
+   #:persist
    #:ttl
+   #:pttl
    #:select
    #:move
    #:flushdb
    #:flushall
+   #:dump
+   #:restore
    ;; Commands operating on string values (incl. pseudo-integers)
    #:set
    #:get
@@ -53,9 +60,18 @@
    #:decrby
    #:append
    #:substr
+   #:bitcount
+   #:getbit
+   #:setbit
+   #:getrange
+   #:setrange
+   #:strlen
+   #:psetex
    ;; Commands operating on lists
    #:rpush
+   #:rpushx
    #:lpush
+   #:lpushx
    #:llen
    #:lrange
    #:ltrim
@@ -66,6 +82,7 @@
    #:rpop
    #:blpop
    #:brpop
+   #:brpoplpush
    #:rpoplpush
    ;; Commands operating on sets
    #:sadd
@@ -92,6 +109,7 @@
    #:zrevrange
    #:zrangebyscore
    #:zcard
+   #:zcount
    #:zscore
    #:zremrangebyrank
    #:zremrangebyscore
@@ -109,12 +127,15 @@
    #:hkeys
    #:hvals
    #:hgetall
+   #:hmget
    ;; Sorting
    #:sort
    ;; Transactions
    #:multi
    #:exec
    #:discard
+   #:watch
+   #:unwatch
    ;; Publish/Subscribe
    #:pubsub-bad-event
    #:pubsub-bad-event-event
@@ -133,8 +154,9 @@
    #:info
    #:slaveof
    #:config
-   ;; Undocumented in command reference
-   #:ping))
+   #:echo
+   #:ping
+   #:time))
 
 (in-package #:lredis)
 
@@ -232,7 +254,7 @@
              (write-sequence sequence out)
              (write-sequence #(13 10) out))
        sequences))
-             
+
 (defmacro define-command (name &rest spec)
   (let ((booleanize (when (eq (car spec) :boolean) (pop spec)))
         (no-read (when (eq (car spec) :no-read) (pop spec)))
@@ -287,15 +309,13 @@
                 `(translate-result (read-reply connection) octets ,booleanize)))))))
 
 ;; Connection handling
+;; TODO: client commands
 
 (define-command quit :no-read "Close the connection.")
 (define-command auth (password :string) "Simple password authentication if enabled.")
 
 ;; Commands operating on all kinds of values
-
-;; According to the command reference keys should return a
-;; space-separated list of keys, but it looks like this is no longer
-;; the case.
+;; TODO: scan commands
 
 (define-command exists :boolean (key :key) "Test if a key exists.")
 (define-command del :boolean (key :key) "Delete a key.")
@@ -306,13 +326,21 @@
 (define-command renamenx :boolean (oldname :key) (newname :key) "Rename the old key to the new one unless a key with the new name already exists.")
 (define-command dbsize "Return the number of keys in the current database.")
 (define-command expire :boolean (key :key) (seconds :integer) "Expire key in a number of seconds from now.")
+(define-command expireat :boolean (key :key) (timestamp :integer) "Set the expiration for a key as a UNIX timestamp.")
+(define-command pexpire :boolean (key :key) (milliseconds :integer) "Set a key's time to live in milliseconds.")
+(define-command pexpireat :boolean (key :key) (milliseconds-timestamp :integer) "Set the expiration for a key as a UNIX timestamp specified in milliseconds.")
+(define-command persist :boolean (key :key) "Remove the expiration from a key.")
 (define-command ttl (key :key) "Get the number of seconds from now until expiry.")
+(define-command pttl (key :key) "Get the time to live for a key in milliseconds.")
 (define-command select (index :integer) "Select the database having the specified index.")
 (define-command move :boolean (key :key) (dbindex :integer) "Move the key from the currently selected database to a database specified by index.")
 (define-command flushdb "Remove all the keys of the currently selected database.")
 (define-command flushall "Remove all the keys from all the databases.")
+(define-command dump (key :key) "Serialize the value stored at key.")
+(define-command restore (key :key) (ttl :integer) (value :bulk) "Create a key associated with the deserialized value.")
 
 ;; Commands operating on string values (incl. pseudo-integers)
+;; TODO: bitop commands, incrbyfloat
 
 (define-command set (key :key) (value :bulk) "Set a key to a string value.")
 (define-command get (key :key) "Return the string value of the key.")
@@ -328,11 +356,21 @@
 (define-command decrby (key :key) (integer :integer) "Decrement the integer value of key by integer.")
 (define-command append (key :key) (value :bulk) "Append the specified string to the string stored at key.")
 (define-command substr (key :key) (start :integer) (end :integer) "Return a substring out of a larger string.")
+(define-command bitcount (key :key) (start :integer) (end :integer) "Count the number of set bits in a string.")
+(define-command getbit (key :key) (offset :integer) "Returns the bit value at offset in the string value stored at key.")
+(define-command setbit (key :key) (offset :integer) (value :integer) "Sets or clears the bit at offset in the string value stored at key.")
+(define-command getrange (key :key) (start :integer) (end :integer) "Get a substring of the string stored at a key (like SUBSTR).")
+(define-command setrange (key :key) (offset :integer) (value :bulk) "Overwrite part of a string at key starting at the specified offset.")
+(define-command strlen (key :key) "Get the length of the value stored in key.")
+(define-command psetex (key :key) (milliseconds :integer) (value :bulk) "Set the value and expiration in milliseconds of a key.")
 
 ;; Commands operating on lists
+;; TODO: linsert
 
 (define-command rpush (key :key) (value :bulk) "Append an element to the tail of the list value at key.")
+(define-command rpushx (key :key) (value :bulk) "Append a value to a list, only if the list exists.")
 (define-command lpush (key :key) (value :bulk) "Append an element to the head of the list value at key.")
+(define-command lpushx (key :key) (value :bulk) "Prepend a value to a list, only if the list exists.")
 (define-command llen (key :key) "Return the length of the list value at key.")
 (define-command lrange (key :key) (start :integer) (end :integer) "Return a range of elements from the list at key.")
 (define-command ltrim (key :key) (start :integer) (end :integer) "Trim the list at key to the specified range of elements.")
@@ -343,6 +381,7 @@
 (define-command rpop (key :key) "Return and remove (atomically) the last element of the list at key.")
 (define-command blpop (list keys :key) (timeout :integer) "Blocking LPOP")
 (define-command brpop (list keys :key) (timeout :integer) "Blocking RPOP")
+(define-command brpoplpush (source :key) (destination :key) (timeout :integer) "Pop a value from a list, push it to another list and return it; or block until one is available.")
 (define-command rpoplpush (srckey :key) (dstkey :key)
   "Return and remove (atomically) the last element of the source list
 stored at srckey and push the same element to the destination list
@@ -368,6 +407,7 @@ the sets stored at the rest of the keys, and store it at dstkey.")
 (define-command srandmember (key :key) "Return a random member of the set value at key.")
 
 ;; Commands operating on sorted sets (zsets)
+;; TODO: withscores stuff
 
 (define-command zadd (key :key) (score :integer) (member :bulk)
   "Add the specified member to the sorted set value at key or update
@@ -392,6 +432,7 @@ greatest to the smallest score.")
   "Return all the elements with min <= score <= max (a range query)
 from the sorted set.")
 (define-command zcard (key :key) "Return the number of elements (cardinality) of the sorted set at key.")
+(define-command zcount (key :key) (min :integer) (max :integer) "Count the members in a sorted set with scores within the given values.")
 (define-command zscore (key :key) (element :bulk) "Return the score associated with the specified element of the sorted set at key.")
 (define-command zremrangebyrank (key :key) (min :integer) (max :integer)
   "Remove all the elements with min <= rank <= max rank from the sorted set.")
@@ -432,6 +473,7 @@ from the sorted set.")
   (frob zinterstore "Intersect over a number of sorted sets with optional weight and aggregate."))
 
 ;; Commands operating on hashes
+;; TODO: hincrbyfloat
 
 ;; Some commands here are bulk commands rather than inline.  Why?
 
@@ -446,6 +488,7 @@ from the sorted set.")
 (define-command hkeys (key :key) "Return all the fields in a hash.")
 (define-command hvals (key :key) "Return all the values in a hash.")
 (define-command hgetall (key :key) "Return all the fields and associated values in a hash.")
+(define-command hmget (key :key) (list fields :string) "Returns the values associated with the specified fields in the hash stored at key.")
 
 ;; Sorting
 
@@ -489,8 +532,11 @@ from the sorted set.")
 (define-command multi "Begin a transaction")
 (define-command exec "Commit transaction")
 (define-command discard "Rollback transaction")
+(define-command watch (list keys :key) "Watch the given keys to determine execution of the MULTI/EXEC block.")
+(define-command unwatch "Forget about all watched keys.")
 
 ;; Publish/Subscribe
+;; TODO: pubsub
 
 (define-command %subscribe :no-read "SUBSCRIBE" (list channels :key) "Subscribe the client to the specified channels.")
 (define-command %unsubscribe :no-read "UNSUBSCRIBE" (list channels :key)
@@ -594,6 +640,7 @@ active and false otherwise."
             t)))))
 
 ;; Persistence control commands
+;; TODO: new shutdown
 
 (define-command save "Synchronously save the database on disk.")
 (define-command bgsave "Asynchronously save the database on disk.")
@@ -602,11 +649,11 @@ active and false otherwise."
 (define-command bgrewriteaof "Rewrite the append only file in the background when it gets too big.")
 
 ;; Remote server control commands
+;; TODO: new config, debug, eval, evalsha, new info, migrate, monitor, object, script, slowlog
 
 (define-command info "Provide information and statistics about the server")
 (define-command slaveof (host :string) (port :integer) "Change the replication settings.")
 (define-command config "Configure a redis server at runtime.")
-
-;; Undocumented in command reference
-
+(define-command echo (message :string) "Echo the given string.")
 (define-command ping "Ping the redis server.")
+(define-command time "Return the current server time.")
