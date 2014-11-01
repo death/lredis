@@ -153,7 +153,10 @@
    ;; Remote server control commands
    #:info
    #:slaveof
-   #:config
+   #:config-get
+   #:config-set
+   #:config-rewrite
+   #:config-resetstat
    #:echo
    #:ping
    #:time))
@@ -260,10 +263,13 @@
         (no-read (when (eq (car spec) :no-read) (pop spec)))
         (docstring (car (last spec)))
         (spec (butlast spec)))
-    (unless (stringp (car spec))
+    (unless (or (stringp (car spec))
+                (and (consp (car spec))
+                     (stringp (caar spec))))
       (push (symbol-name name) spec))
     (let ((inputs (cl:append (mapcan (lambda (x)
-                                       (when (consp x)
+                                       (when (and (consp x)
+                                                  (not (stringp (car x))))
                                          (list (if (eq (car x) 'list)
                                                    (cadr x)
                                                    (car x)))))
@@ -279,6 +285,9 @@
                  (etypecase x
                    (string
                     (sequence-adding-form x))
+                   ((cons string)
+                    `(progn
+                       ,@(mapcar #'sequence-adding-form x)))
                    ((cons (eql list))
                     (destructuring-bind (op var &rest types) x
                       (declare (ignore op))
@@ -653,7 +662,10 @@ active and false otherwise."
 
 (define-command info "Provide information and statistics about the server")
 (define-command slaveof (host :string) (port :integer) "Change the replication settings.")
-(define-command config "Configure a redis server at runtime.")
+(define-command config-get ("CONFIG" "GET") (pattern :string) "Read configuration parameters matching pattern.")
+(define-command config-rewrite ("CONFIG" "REWRITE") "Rewrite redis configuration file.")
+(define-command config-set ("CONFIG" "SET") (name :string) (value :string) "Set a configuration variable.")
+(define-command config-resetstat ("CONFIG" "RESETSTAT") "Reset statistics reported by INFO.")
 (define-command echo (message :string) "Echo the given string.")
 (define-command ping "Ping the redis server.")
 (define-command time "Return the current server time.")
